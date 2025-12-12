@@ -7,7 +7,8 @@
     "jsonwebtoken": "^9.0.3",
     "mongodb": "^7.0.0",
     "mongoose": "^9.0.1",
-    "multer": "^2.0.2"
+    "multer": "^2.0.2",
+    "stripe": "^20.0.0"
   },
   "name": "issue-server-site",
   "version": "1.0.0",
