@@ -1,5 +1,6 @@
 const express = require("express");
 const { MongoClient, ObjectId } = require("mongodb");
+const multer = require("multer");
 const cors = require("cors");
 const jwt = require("jsonwebtoken"); // ⬅️ এটি যোগ করুন
 require("dotenv").config();
@@ -30,49 +31,51 @@ async function connectDB() {
   console.log("✅ MongoDB Connected");
 }
 connectDB();
-
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, "uploads/"),
+  filename: (req, file, cb) =>
+    cb(null, Date.now() + path.extname(file.originalname)),
+});
+const upload = multer({ storage });
 // Fake auth middleware
 
-const admin = require("./firebaseAdmin");
-
+// ✅ নতুন: JWT যাচাই মিডলওয়্যার
 const verifyToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  console.log("AUTH HEADER =", authHeader);
+
+  if (!authHeader) {
+    return res.status(401).json({ message: "লগইন করুন!" });
+  }
+
+  const token = authHeader.split(" ")[1];
+  console.log("TOKEN =", token);
+
+  if (!token) {
+    return res.status(401).json({ message: "লগইন করুন!" });
+  }
+
   try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader && authHeader.split(" ")[1];
+    const decoded = jwt.verify(token, jwtSecret);
+    const user = await users.findOne({ _id: new ObjectId(decoded.userId) });
 
-    if (!token || token === "no-token") {
-      return res.status(401).json({ message: "লগইন করুন!" });
-    }
-
-    const user =
-      req.app.locals.currentUser ||
-      JSON.parse(require("fs").readFileSync("user.json", "utf8") || "{}");
-    console.log(user, token);
-    if (user?.token !== token) {
-      return res.status(401).json({ message: "token not match" });
+    if (!user) {
+      return res.status(401).json({ message: "User not found" });
     }
 
     req.user = {
-      uid: user._id || user.uid,
-      name: user.name || user.email?.split("@")[0],
+      uid: user._id.toString(),
+      name: user.name || user.email.split("@")[0],
       email: user.email,
       role: user.role || "citizen",
-      blocked: user.blocked || false,
     };
 
     next();
   } catch (err) {
-    console.error("verifyToken ERROR:", err);
-    res.status(401).json({ message: "no token match" });
+    console.error("JWT ERROR:", err.message);
+    return res.status(401).json({ message: "Session expired. Login again." });
   }
 };
-
-// const storage = multer.diskStorage({
-//   destination: (req, file, cb) => cb(null, "uploads/"),
-//   filename: (req, file, cb) =>
-//     cb(null, Date.now() + path.extname(file.originalname)),
-// });
-// const upload = multer({ storage });
 
 // ---------------------- Create Issue (আপডেটেড) ----------------------
 app.post("/issues", verifyToken, upload.single("image"), async (req, res) => {
@@ -91,6 +94,7 @@ app.post("/issues", verifyToken, upload.single("image"), async (req, res) => {
       location,
       status: "pending",
       priority: "normal",
+      assignedStaff: null,
       upvotes: [],
       date: new Date(),
       imageUrl: imageUrl || "/placeholder.jpg",
@@ -101,7 +105,7 @@ app.post("/issues", verifyToken, upload.single("image"), async (req, res) => {
           status: "pending",
           message: "Issue reported by citizen",
           updatedBy: req.user.name,
-          date: new Date(),
+          createdAt: new Date(),
         },
       ],
     };
@@ -144,22 +148,29 @@ app.post("/issues/:id/upvote", verifyToken, async (req, res) => {
 
 // ---------------------- Get Issues with pagination, filter, search ----------------------
 // Get Issues with pagination, filter, search — using aggregation for priority sort
-app.get("/issues", async (req, res) => {
+app.get("/issues", verifyToken, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 8;
+
     const match = {};
+
+    // 🔥 ONLY MY ISSUES
+    if (req.query.mine === "true") {
+      match.uid = req.user.uid;
+    }
 
     if (req.query.category && req.query.category !== "all")
       match.category = req.query.category;
+
     if (req.query.status && req.query.status !== "all")
       match.status = req.query.status;
+
     if (req.query.search)
       match.title = { $regex: req.query.search, $options: "i" };
 
     const pipeline = [
       { $match: match },
-      // priorityRank: high -> 1, others -> 0
       {
         $addFields: {
           priorityRank: {
@@ -173,11 +184,12 @@ app.get("/issues", async (req, res) => {
     ];
 
     const data = await issues.aggregate(pipeline).toArray();
-
     const total = await issues.countDocuments(match);
-    const totalPages = Math.ceil(total / limit);
 
-    res.send({ issues: data, totalPages });
+    res.send({
+      issues: data,
+      totalPages: Math.ceil(total / limit),
+    });
   } catch (err) {
     console.error(err);
     res.status(500).send({ message: "Failed to fetch issues" });
@@ -527,10 +539,13 @@ app.get(
   verifyToken,
   verifyRole("staff"),
   async (req, res) => {
-    const staffId = req.user.id; // JWT থেকে staffId আসবে
+    const staffId = req.user.uid; // ✅ সঠিক
 
     const assignedIssues = await issues
-      .find({ "assigned.staffId": staffId })
+      .find({
+        assignedStaff: { $ne: null },
+        "assignedStaff.staffId": req.user.uid,
+      })
       .toArray();
 
     res.send(assignedIssues);
@@ -584,11 +599,17 @@ app.patch(
     await issues.updateOne(
       { _id: new ObjectId(issueId) },
       {
-        $set: { status: "rejected" },
+        $set: {
+          assignedStaff: {
+            staffId: staffId.toString(),
+            staffName,
+          },
+          status: "in-progress",
+        },
         $push: {
           timeline: {
-            status: "rejected",
-            message: reason || "Issue rejected by admin",
+            status: "assigned",
+            message: `Assigned to ${staffName}`,
             updatedBy: "Admin",
             date: new Date(),
           },
@@ -642,7 +663,8 @@ app.post("/login", async (req, res) => {
     user: {
       _id: user._id,
       email: user.email,
-      // ... (বাকি user ডেটা)
+      role: user.role, // 🔥 MUST
+      name: user.name,
     },
   });
 });
@@ -653,8 +675,10 @@ app.get("/staff/issues", verifyToken, verifyRole("staff"), async (req, res) => {
     .find({ "assignedStaff.staffId": req.user.uid })
     .sort({ date: -1 })
     .toArray();
+
   res.send(all);
 });
+
 // Staff issue update route
 app.patch(
   "/staff/issue/:id/status",
