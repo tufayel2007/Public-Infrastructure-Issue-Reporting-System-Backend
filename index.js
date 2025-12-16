@@ -43,20 +43,27 @@ const verifyToken = async (req, res, next) => {
   console.log("AUTH HEADER =", authHeader);
 
   if (!authHeader) {
-    return res.status(401).json({ message: "লগইন করুন!" });
+    return res.status(401).json({ message: "Login Now !" });
   }
 
   const token = authHeader.split(" ")[1];
   console.log("TOKEN =", token);
 
   if (!token) {
-    return res.status(401).json({ message: "লগইন করুন!" });
+    return res.status(401).json({ message: "Login Now!" });
   }
 
   try {
     const decoded = jwt.verify(token, jwtSecret);
     const user = await users.findOne({ _id: new ObjectId(decoded.userId) });
-    console.log("Decoded user:", decoded);
+    if (user.blocked) {
+      return res.status(403).json({
+        message:
+          "Your account is blocked. Contact authority. and Contact Admin or Staff ",
+        blocked: true,
+      });
+    }
+    // console.log("Decoded user:", decoded);
 
     if (!user) {
       return res.status(401).json({ message: "User not found" });
@@ -80,11 +87,10 @@ const verifyToken = async (req, res, next) => {
 // ---------------------- Latest Updates (Public or Authenticated) ---------------------
 app.get("/issues/resolved/latest", async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 6; // Default 6 issues
-
+    const limit = parseInt(req.query.limit) || 6;
     const data = await issues
       .find({ status: "resolved" })
-      .sort({ date: -1 }) // নতুনতম আগে
+      .sort({ date: -1 })
       .limit(limit)
       .toArray();
 
@@ -695,12 +701,14 @@ app.post("/login", async (req, res) => {
 
   res.send({
     success: true,
-    token, // 🔥 এটি এখন আসল JWT
+    token,
     user: {
       _id: user._id,
       email: user.email,
-      role: user.role, // 🔥 MUST
+      role: user.role,
       name: user.name,
+      subscription: user.subscription || "free",
+      avatarUrl: user.photo || null,
     },
   });
 });
@@ -948,29 +956,43 @@ app.post("/payment/premium/verify", verifyToken, async (req, res) => {
 });
 // #****************************************########################################
 // ---------------------- Get Current User Profile (Only Own) ----------------------
-// GET Profile
-app.get("/api/profile", verifyToken, async (req, res) => {
-  try {
-    const userId = req.user.uid;
+// Update user profile (name + photo)
 
-    const profile = await profileCollection.findOne({
-      _id: new ObjectId(userId),
-    });
+app.put(
+  "/api/profile",
+  verifyToken,
+  upload.single("photo"),
+  async (req, res) => {
+    try {
+      const { name } = req.body;
+      const updateData = {};
 
-    if (!profile) {
-      return res.json({
+      if (name) updateData.name = name;
+      if (req.file) updateData.photo = `/uploads/${req.file.filename}`;
+
+      const result = await users.findOneAndUpdate(
+        { _id: new ObjectId(req.user.uid) },
+        { $set: updateData },
+        { returnDocument: "after" }
+      );
+
+      if (!result.value)
+        return res.status(404).json({ message: "User not found" });
+
+      res.json({
         success: true,
-        profile: null,
-        message: "Profile not created yet",
+        user: {
+          ...result.value,
+          avatarUrl: result.value.photo || null, // 🔥 critical
+          _id: result.value._id.toString(),
+        },
       });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ message: "Failed to update profile" });
     }
-
-    res.json({ success: true, profile });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to fetch profile" });
   }
-});
+);
 
 // ---------------------- Start Server ----------------------
 app.listen(port, () =>
