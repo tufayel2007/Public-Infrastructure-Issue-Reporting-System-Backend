@@ -2,7 +2,7 @@ const express = require("express");
 const { MongoClient, ObjectId } = require("mongodb");
 const multer = require("multer");
 const cors = require("cors");
-const jwt = require("jsonwebtoken"); // ⬅️ এটি যোগ করুন
+const jwt = require("jsonwebtoken");
 require("dotenv").config();
 const jwtSecret = process.env.JWT_SECRET;
 const path = require("path");
@@ -20,7 +20,7 @@ const client = new MongoClient(process.env.MONGO_URI, {
   serverApi: { version: "1", strict: true, deprecationErrors: true },
 });
 
-let issues, users;
+let issues, users, payments;
 
 async function connectDB() {
   await client.connect();
@@ -37,9 +37,7 @@ const storage = multer.diskStorage({
     cb(null, Date.now() + path.extname(file.originalname)),
 });
 const upload = multer({ storage });
-// Fake auth middleware
 
-// ✅ নতুন: JWT যাচাই মিডলওয়্যার
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   console.log("AUTH HEADER =", authHeader);
@@ -58,6 +56,7 @@ const verifyToken = async (req, res, next) => {
   try {
     const decoded = jwt.verify(token, jwtSecret);
     const user = await users.findOne({ _id: new ObjectId(decoded.userId) });
+    console.log("Decoded user:", decoded);
 
     if (!user) {
       return res.status(401).json({ message: "User not found" });
@@ -68,6 +67,8 @@ const verifyToken = async (req, res, next) => {
       name: user.name || user.email.split("@")[0],
       email: user.email,
       role: user.role || "citizen",
+      subscription: user.subscription || "free",
+      avatarUrl: user.photoURL || null,
     };
 
     next();
@@ -76,7 +77,26 @@ const verifyToken = async (req, res, next) => {
     return res.status(401).json({ message: "Session expired. Login again." });
   }
 };
+// ---------------------- Latest Updates (Public or Authenticated) ---------------------
+app.get("/issues/resolved/latest", async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 6; // Default 6 issues
 
+    const data = await issues
+      .find({ status: "resolved" })
+      .sort({ date: -1 }) // নতুনতম আগে
+      .limit(limit)
+      .toArray();
+
+    res.send({ success: true, issues: data });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({
+      success: false,
+      message: "Failed to fetch latest resolved issues",
+    });
+  }
+});
 // ---------------------- Create Issue (আপডেটেড) ----------------------
 app.post("/issues", verifyToken, upload.single("image"), async (req, res) => {
   try {
@@ -84,7 +104,19 @@ app.post("/issues", verifyToken, upload.single("image"), async (req, res) => {
     let imageUrl = "";
 
     if (req.file) imageUrl = "/uploads/" + req.file.filename;
+    if (req.user.subscription !== "premium") {
+      const totalIssues = await issues.countDocuments({ uid: req.user.uid });
 
+      if (totalIssues >= 3) {
+        return res.status(403).json({
+          message:
+            "ফ্রি ইউজারের সর্বোচ্চ ৩টি রিপোর্টের লিমিট শেষ। প্রিমিয়াম নিন।",
+          needPremium: true,
+        });
+      }
+    }
+    const issuePriority =
+      req.user.subscription === "premium" ? "high" : "normal";
     const newIssue = {
       uid: req.user.uid,
       citizenName: req.user.name,
@@ -93,7 +125,7 @@ app.post("/issues", verifyToken, upload.single("image"), async (req, res) => {
       category,
       location,
       status: "pending",
-      priority: "normal",
+      priority: issuePriority,
       assignedStaff: null,
       upvotes: [],
       date: new Date(),
@@ -103,7 +135,10 @@ app.post("/issues", verifyToken, upload.single("image"), async (req, res) => {
       timeline: [
         {
           status: "pending",
-          message: "Issue reported by citizen",
+          message:
+            issuePriority === "high"
+              ? "Premium user issue (High Priority)"
+              : "Issue reported by citizen",
           updatedBy: req.user.name,
           createdAt: new Date(),
         },
@@ -196,8 +231,6 @@ app.get("/issues", verifyToken, async (req, res) => {
   }
 });
 
-// ---------------------- React to Issue ----------------------
-
 // ---------------------- React to Issue (Single Reaction) ----------------------
 app.post("/issues/:id/react", verifyToken, async (req, res) => {
   try {
@@ -272,6 +305,10 @@ app.get("/citizen/stats", verifyToken, async (req, res) => {
 
   res.send({ total, pending, inProgress, resolved });
 });
+const profileCollection = client
+  .db("IssueHub")
+  .collection("User_And_Admin_And_Staff_fProfile");
+
 // ---------------------- Comment on Issue ----------------------
 app.post("/issues/:id/comment", verifyToken, async (req, res) => {
   try {
@@ -325,7 +362,10 @@ app.put("/issues/:id", verifyToken, async (req, res) => {
 
     if (!issue) return res.status(404).send({ message: "Issue not found" });
     if (issue.uid !== req.user.uid)
-      return res.status(403).send({ message: "Unauthorized" });
+      return res.status(403).send({
+        message:
+          "This issue is currently in progress and cannot be edited at this time.",
+      });
     if (issue.status !== "pending")
       return res
         .status(400)
@@ -600,16 +640,12 @@ app.patch(
       { _id: new ObjectId(issueId) },
       {
         $set: {
-          assignedStaff: {
-            staffId: staffId.toString(),
-            staffName,
-          },
-          status: "in-progress",
+          status: "rejected",
         },
         $push: {
           timeline: {
-            status: "assigned",
-            message: `Assigned to ${staffName}`,
+            status: "rejected",
+            message: reason || "Issue rejected by admin",
             updatedBy: "Admin",
             date: new Date(),
           },
@@ -620,6 +656,7 @@ app.patch(
     res.send({ success: true });
   }
 );
+
 // Get All Payments (Admin
 app.get(
   "/admin/payments",
@@ -650,11 +687,10 @@ app.post("/login", async (req, res) => {
   if (user.blocked)
     return res.status(403).send({ message: "This user is blocked" });
 
-  // ✅ নতুন: শক্তিশালী JWT টোকেন তৈরি করুন
   const token = jwt.sign(
     { userId: user._id.toString(), email: user.email, role: user.role }, // Payload
-    jwtSecret, // Secret Key
-    { expiresIn: "7d" } // মেয়াদকাল: 7 দিন
+    jwtSecret,
+    { expiresIn: "7d" }
   );
 
   res.send({
@@ -757,6 +793,12 @@ app.post("/payment/boost/create-session", verifyToken, async (req, res) => {
           quantity: 1,
         },
       ],
+      // 🔥 VERY IMPORTANT
+      metadata: {
+        issueId: issueId,
+        uid: req.user.uid,
+        type: "boost",
+      },
       success_url: `${process.env.CLIENT_URL}/boost/success?session_id={CHECKOUT_SESSION_ID}&issueId=${issueId}`,
       cancel_url: `${process.env.CLIENT_URL}/boost/cancel`,
     });
@@ -827,6 +869,106 @@ app.post("/payment/verify", verifyToken, async (req, res) => {
     res
       .status(500)
       .send({ message: "Verification failed", error: err.message });
+  }
+});
+// ################################################# premium futer options
+app.post("/payment/premium/create-session", verifyToken, async (req, res) => {
+  try {
+    if (req.user.subscription === "premium") {
+      return res.status(400).json({ message: "Already premium" });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      payment_method_types: ["card"],
+      customer_email: req.user.email,
+      line_items: [
+        {
+          price_data: {
+            currency: "bdt",
+            product_data: {
+              name: "প্রিমিয়াম সাবস্ক্রিপশন - আনলিমিটেড রিপোর্ট",
+            },
+            unit_amount: 1000 * 100,
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        uid: req.user.uid,
+        type: "premium",
+      },
+      success_url: `${process.env.CLIENT_URL}/citizen/premium/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.CLIENT_URL}/citizen/premium/cancel`,
+    });
+
+    res.json({ url: session.url });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Payment session failed" });
+  }
+});
+app.post("/payment/premium/verify", verifyToken, async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+    if (session.payment_status !== "paid") {
+      return res.status(400).json({ message: "Payment not completed" });
+    }
+
+    if (session.metadata.uid !== req.user.uid) {
+      return res.status(403).json({ message: "Unauthorized" });
+    }
+
+    if (session.amount_total !== 1000 * 100) {
+      return res.status(400).json({ message: "Invalid payment amount" });
+    }
+
+    await users.updateOne(
+      { _id: new ObjectId(req.user.uid) },
+      { $set: { subscription: "premium", premiumUntil: null } }
+    );
+
+    await client.db("IssueHub").collection("payments").insertOne({
+      stripeSessionId: session.id,
+      type: "premium",
+      uid: req.user.uid,
+      amount: 1000,
+      currency: "bdt",
+      status: "success",
+      date: new Date(),
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Verification failed" });
+  }
+});
+// #****************************************########################################
+// ---------------------- Get Current User Profile (Only Own) ----------------------
+// GET Profile
+app.get("/api/profile", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+
+    const profile = await profileCollection.findOne({
+      _id: new ObjectId(userId),
+    });
+
+    if (!profile) {
+      return res.json({
+        success: true,
+        profile: null,
+        message: "Profile not created yet",
+      });
+    }
+
+    res.json({ success: true, profile });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch profile" });
   }
 });
 
