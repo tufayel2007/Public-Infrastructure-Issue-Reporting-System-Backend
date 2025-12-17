@@ -279,7 +279,7 @@ app.post("/register/citizen", upload.single("photo"), async (req, res) => {
     }
 
     const newUser = {
-      name, // <-- Store name
+      name,
       email,
       password,
       role: "citizen",
