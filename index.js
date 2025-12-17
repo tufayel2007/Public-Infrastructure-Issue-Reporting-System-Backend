@@ -15,7 +15,7 @@ app.use(cors());
 app.use(express.json());
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-// MongoDB connection
+// MongoDB
 const client = new MongoClient(process.env.MONGO_URI, {
   serverApi: { version: "1", strict: true, deprecationErrors: true },
 });
