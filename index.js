@@ -84,7 +84,7 @@ const verifyToken = async (req, res, next) => {
     return res.status(401).json({ message: "Session expired. Login again." });
   }
 };
-// ---------------------- Latest Updates (Public or Authenticated) ---------------------
+// -------------------- Latest Updates (Public or Authenticated) ---------------------
 app.get("/issues/resolved/latest", async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 6;
