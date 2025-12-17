@@ -63,7 +63,6 @@ const verifyToken = async (req, res, next) => {
         blocked: true,
       });
     }
-    // console.log("Decoded user:", decoded);
 
     if (!user) {
       return res.status(401).json({ message: "User not found" });
