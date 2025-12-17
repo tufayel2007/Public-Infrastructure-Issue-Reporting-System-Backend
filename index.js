@@ -39,6 +39,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 const verifyToken = async (req, res, next) => {
+  console.log(req.user);
   const authHeader = req.headers.authorization;
   console.log("AUTH HEADER =", authHeader);
 
@@ -196,7 +197,6 @@ app.get("/issues", verifyToken, async (req, res) => {
 
     const match = {};
 
-    // 🔥 ONLY MY ISSUES
     if (req.query.mine === "true") {
       match.uid = req.user.uid;
     }
@@ -266,25 +266,25 @@ app.post("/issues/:id/react", verifyToken, async (req, res) => {
 // citizen
 app.post("/register/citizen", upload.single("photo"), async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { name, email, password } = req.body;
 
-    if (!email || !password)
+    if (!name || !email || !password)
       return res
         .status(400)
         .send({ success: false, message: "Missing fields" });
 
     const usersCollection = client.db("IssueHub").collection("users");
 
-    // check already exists
     const exists = await usersCollection.findOne({ email });
     if (exists) {
       return res.send({ success: false, message: "User already exists" });
     }
 
     const newUser = {
+      name, // <-- Store name
       email,
       password,
-      role: "citizen", // ✔ DEFAULT ROLE
+      role: "citizen",
       photo: req.file ? `/uploads/${req.file.filename}` : null,
       createdAt: new Date(),
     };
@@ -402,7 +402,7 @@ app.put("/issues/:id", verifyToken, async (req, res) => {
 });
 
 // Delete issue (only pending + own issue)
-// Delete issue (Admin can delete any closed issue)
+
 app.delete("/issues/:id", verifyToken, async (req, res) => {
   try {
     const issueId = req.params.id;
@@ -585,7 +585,7 @@ app.get(
   verifyToken,
   verifyRole("staff"),
   async (req, res) => {
-    const staffId = req.user.uid; // ✅ সঠিক
+    const staffId = req.user.uid;
 
     const assignedIssues = await issues
       .find({
@@ -679,7 +679,7 @@ app.get(
   }
 );
 // admin login
-// admin login (সংশোধিত JWT কোড)
+
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
@@ -782,11 +782,17 @@ const stripe = Stripe(process.env.STRIPE_SECRET);
 // Boost Payment Session
 app.post("/payment/boost/create-session", verifyToken, async (req, res) => {
   try {
-    const { amount, issueId } = req.body;
+    const { issueId } = req.body;
 
-    if (!amount || !issueId) {
-      return res.status(400).json({ message: "Missing amount or issueId" });
+    if (!issueId) {
+      return res.status(400).json({ message: "IssueId required" });
     }
+
+    const isPremium = req.user.subscription === "premium";
+
+    // ✅ price + currency logic
+    const currency = isPremium ? "usd" : "bdt";
+    const amount = isPremium ? 0.5 : 100; // 0.5 USD ≈ 50 BDT
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
@@ -794,18 +800,27 @@ app.post("/payment/boost/create-session", verifyToken, async (req, res) => {
       line_items: [
         {
           price_data: {
-            currency: "usd",
-            product_data: { name: "Issue Boost" },
-            unit_amount: amount * 100,
+            currency,
+            product_data: {
+              name: isPremium
+                ? "Issue Boost (Premium User - Discounted)"
+                : "Issue Boost (Free User)",
+            },
+            unit_amount:
+              currency === "usd"
+                ? Math.round(amount * 100) // cents
+                : amount * 100, // paisa
           },
           quantity: 1,
         },
       ],
-      // 🔥 VERY IMPORTANT
       metadata: {
-        issueId: issueId,
+        issueId,
         uid: req.user.uid,
         type: "boost",
+        amount,
+        currency,
+        userType: isPremium ? "premium" : "free",
       },
       success_url: `${process.env.CLIENT_URL}/boost/success?session_id={CHECKOUT_SESSION_ID}&issueId=${issueId}`,
       cancel_url: `${process.env.CLIENT_URL}/boost/cancel`,
@@ -814,10 +829,7 @@ app.post("/payment/boost/create-session", verifyToken, async (req, res) => {
     res.json({ url: session.url });
   } catch (error) {
     console.error("STRIPE ERROR:", error);
-    res.status(500).json({
-      message: "Stripe session failed",
-      error: error.message,
-    });
+    res.status(500).json({ message: "Stripe session failed" });
   }
 });
 
@@ -995,6 +1007,15 @@ app.put(
 );
 
 // ---------------------- Start Server ----------------------
-app.listen(port, () =>
-  console.log(`🚀 Server running on http://localhost:${port}`)
-);
+async function startServer() {
+  try {
+    await connectDB();
+    app.listen(port, () =>
+      console.log(`🚀 Server running on http://localhost:${port}`)
+    );
+  } catch (err) {
+    console.error("Failed to connect to MongoDB:", err);
+  }
+}
+
+startServer();
