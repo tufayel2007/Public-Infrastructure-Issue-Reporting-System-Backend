@@ -23,7 +23,6 @@ const client = new MongoClient(process.env.MONGO_URI, {
 let issues, users, payments;
 
 async function connectDB() {
-  await client.connect();
   const db = client.db("IssueHub");
   issues = db.collection("issues");
   payments = db.collection("payments");
