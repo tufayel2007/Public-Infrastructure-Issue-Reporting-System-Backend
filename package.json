@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "cloudinary": "^2.8.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
@@ -8,7 +9,9 @@
     "mongodb": "^7.0.0",
     "mongoose": "^9.0.1",
     "multer": "^2.0.2",
-    "stripe": "^20.0.0"
+    "pdfkit": "^0.17.2",
+    "serverless-http": "^4.0.0",
+    "stripe": "^20.1.0"
   },
   "name": "issue-server-site",
   "version": "1.0.0",

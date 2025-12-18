@@ -1,6 +1,8 @@
+// Cloudinary index.js file update and
+
 const express = require("express");
 const { MongoClient, ObjectId } = require("mongodb");
-const multer = require("multer");
+
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 require("dotenv").config();
@@ -30,12 +32,6 @@ async function connectDB() {
   console.log("✅ MongoDB Connected");
 }
 connectDB();
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, "uploads/"),
-  filename: (req, file, cb) =>
-    cb(null, Date.now() + path.extname(file.originalname)),
-});
-const upload = multer({ storage });
 
 const verifyToken = async (req, res, next) => {
   console.log(req.user);
@@ -55,6 +51,7 @@ const verifyToken = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, jwtSecret);
+    console.log("DECODED USERID:", decoded.userId);
     const user = await users.findOne({ _id: new ObjectId(decoded.userId) });
     if (user.blocked) {
       return res.status(403).json({
@@ -74,7 +71,7 @@ const verifyToken = async (req, res, next) => {
       email: user.email,
       role: user.role || "citizen",
       subscription: user.subscription || "free",
-      avatarUrl: user.photoURL || null,
+      avatarUrl: user.photo || null,
     };
 
     next();
@@ -103,15 +100,15 @@ app.get("/issues/resolved/latest", async (req, res) => {
   }
 });
 // ---------------------- Create Issue (আপডেটেড) ----------------------
-app.post("/issues", verifyToken, upload.single("image"), async (req, res) => {
+app.post("/issues", verifyToken, async (req, res) => {
   try {
-    const { title, description, category, location } = req.body;
-    let imageUrl = "";
+    const { title, description, category, location, imageUrl } = req.body;
 
-    if (req.file) imageUrl = "/uploads/" + req.file.filename;
+    // imageUrl frontend থেকে Cloudinary-র secure URL হিসেবে আসবে
+    // যদি না থাকে তাহলে placeholder
+
     if (req.user.subscription !== "premium") {
       const totalIssues = await issues.countDocuments({ uid: req.user.uid });
-
       if (totalIssues >= 3) {
         return res.status(403).json({
           message:
@@ -120,8 +117,10 @@ app.post("/issues", verifyToken, upload.single("image"), async (req, res) => {
         });
       }
     }
+
     const issuePriority =
       req.user.subscription === "premium" ? "high" : "normal";
+
     const newIssue = {
       uid: req.user.uid,
       citizenName: req.user.name,
@@ -134,7 +133,8 @@ app.post("/issues", verifyToken, upload.single("image"), async (req, res) => {
       assignedStaff: null,
       upvotes: [],
       date: new Date(),
-      imageUrl: imageUrl || "/placeholder.jpg",
+
+      imageUrl: imageUrl || "/placeholder.jpg", // Cloudinary URL বা placeholder
       reactions: [],
       comments: [],
       timeline: [
@@ -262,18 +262,17 @@ app.post("/issues/:id/react", verifyToken, async (req, res) => {
   }
 });
 // citizen
-app.post("/register/citizen", upload.single("photo"), async (req, res) => {
+app.post("/register/citizen", async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password, photoUrl } = req.body; // photoUrl আসবে
 
-    if (!name || !email || !password)
+    if (!name || !email || !password) {
       return res
         .status(400)
         .send({ success: false, message: "Missing fields" });
+    }
 
-    const usersCollection = client.db("IssueHub").collection("users");
-
-    const exists = await usersCollection.findOne({ email });
+    const exists = await users.findOne({ email });
     if (exists) {
       return res.send({ success: false, message: "User already exists" });
     }
@@ -283,19 +282,19 @@ app.post("/register/citizen", upload.single("photo"), async (req, res) => {
       email,
       password,
       role: "citizen",
-      photo: req.file ? `/uploads/${req.file.filename}` : null,
+      photo: photoUrl || null, // এখানে photoUrl সেভ করো photo ফিল্ডে
       createdAt: new Date(),
+      subscription: "free",
     };
 
-    await usersCollection.insertOne(newUser);
+    await users.insertOne(newUser);
 
     res.send({ success: true, message: "Citizen registered!", user: newUser });
   } catch (error) {
-    console.log(error);
+    console.error(error);
     res.status(500).send({ success: false, message: "Server error" });
   }
 });
-
 // server
 app.get("/citizen/stats", verifyToken, async (req, res) => {
   const uid = req.user.uid;
@@ -968,41 +967,133 @@ app.post("/payment/premium/verify", verifyToken, async (req, res) => {
 // ---------------------- Get Current User Profile (Only Own) ----------------------
 // Update user profile (name + photo)
 
-app.put(
-  "/api/profile",
-  verifyToken,
-  upload.single("photo"),
-  async (req, res) => {
-    try {
-      const { name } = req.body;
-      const updateData = {};
+app.put("/api/profile", verifyToken, async (req, res) => {
+  try {
+    const { name, photoUrl } = req.body;
 
-      if (name) updateData.name = name;
-      if (req.file) updateData.photo = `/uploads/${req.file.filename}`;
+    const updateData = {};
+    if (name) updateData.name = name;
+    if (photoUrl) updateData.photo = photoUrl;
 
-      const result = await users.findOneAndUpdate(
-        { _id: new ObjectId(req.user.uid) },
-        { $set: updateData },
-        { returnDocument: "after" }
-      );
+    const result = await users.findOneAndUpdate(
+      { _id: new ObjectId(req.user.uid) },
+      { $set: updateData },
+      { returnDocument: "after" }
+    );
 
-      if (!result.value)
-        return res.status(404).json({ message: "User not found" });
-
-      res.json({
-        success: true,
-        user: {
-          ...result.value,
-          avatarUrl: result.value.photo || null, // 🔥 critical
-          _id: result.value._id.toString(),
-        },
-      });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ message: "Failed to update profile" });
+    if (!result.value) {
+      return res.status(404).json({ message: "User not found" });
     }
+
+    res.json({
+      success: true,
+      user: {
+        ...result.value,
+        avatarUrl: result.value.photo || null,
+        _id: result.value._id.toString(),
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to update profile" });
   }
-);
+});
+
+const PDFDocument = require("pdfkit");
+
+// ------------------ Admin payments ------------------
+app.get("/admin/payments", verifyToken, async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).send({ message: "Forbidden" });
+    }
+    const allPayments = await payments.find().toArray();
+    res.send({ payments: allPayments });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Failed to fetch payments" });
+  }
+});
+
+// ------------------ Normal user payments ------------------
+app.get("/payments/my", verifyToken, async (req, res) => {
+  try {
+    const myPayments = await payments.find({ uid: req.user.uid }).toArray();
+    res.send({ payments: myPayments });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send({ message: "Failed to fetch payments" });
+  }
+});
+
+// ------------------ Download Invoice ------------------
+app.get("/payment/invoice/:paymentId", verifyToken, async (req, res) => {
+  try {
+    const paymentId = req.params.paymentId;
+
+    if (!ObjectId.isValid(paymentId)) {
+      return res.status(400).send({ message: "Invalid payment ID" });
+    }
+
+    const payment = await payments.findOne({
+      _id: new ObjectId(paymentId),
+    });
+
+    if (!payment) {
+      return res.status(404).send({ message: "Invoice not found" });
+    }
+
+    // Authorization check
+    if (
+      req.user.role !== "admin" &&
+      payment.uid.toString() !== req.user.uid.toString()
+    ) {
+      return res.status(403).send({ message: "Forbidden" });
+    }
+
+    // Find user
+    let user = null;
+    if (payment.uid && ObjectId.isValid(payment.uid)) {
+      user = await users.findOne({ _id: new ObjectId(payment.uid) });
+    }
+
+    // PDF generation
+    const doc = new PDFDocument({ margin: 50 });
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename=invoice-${payment._id}.pdf`
+    );
+    res.setHeader("Content-Type", "application/pdf");
+    doc.pipe(res);
+
+    doc.fontSize(22).text("Public Infrastructure Issue Reporting System", {
+      align: "center",
+    });
+    doc.moveDown();
+    doc.fontSize(16).text("INVOICE", { align: "center" });
+    doc.moveDown(2);
+    doc.fontSize(12);
+
+    doc.text(`Invoice ID: ${payment._id}`);
+    doc.text(`Payment Type: ${payment.type.toUpperCase()}`);
+    doc.text(`User Name: ${user?.name || "N/A"}`);
+    doc.text(`User Email: ${user?.email || "N/A"}`);
+    doc.text(`Issue ID: ${payment.issueId || "N/A"}`);
+    doc.text(
+      `Amount: ${payment.amount} ${payment.currency?.toUpperCase() || ""}`
+    );
+    doc.text(`Status: ${payment.status}`);
+    doc.text(`Date: ${new Date(payment.date).toLocaleString()}`);
+
+    doc.moveDown(3);
+    doc.text("Thank you for your payment!", { align: "center" });
+
+    doc.end();
+  } catch (err) {
+    console.error("Invoice generation error:", err);
+    res.status(500).send({ message: "Failed to generate invoice" });
+  }
+});
 
 // ---------------------- Start Server ----------------------
 async function startServer() {
