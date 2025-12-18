@@ -162,7 +162,8 @@ Crate a new account 🏃🏼‍➡️🏃🏼‍➡️🏃🏼‍➡️ |
 | Developer Name     | Tufayel Ahmed                                                            |
 | Email              | [ta07092007@gmail.com](mailto:ta07092007@gmail.com)                      |
 | GitHub Profile     | [https://github.com/tufayel2007](https://github.com/tufayel2007)         |
-| Project Created On | November 13, 2025                                                        |
+| Project Created On |
+| December 18, 2025  |
 | Tech Stack         | React, TailwindCSS, Firebase, MongoDB, Stripe, TanStack Query            |
 | Contact            | [ta07092007@gmail.com](mailto:ta07092007@gmail.com)                      |
 | Contribution Guide | Fork → Branch → Commit → Pull Request                                    |
