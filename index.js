@@ -23,13 +23,13 @@ const client = new MongoClient(process.env.MONGO_URI, {
 let issues, users, payments;
 
 async function connectDB() {
+  await client.connect();
   const db = client.db("IssueHub");
   issues = db.collection("issues");
   payments = db.collection("payments");
   users = db.collection("users");
   console.log("✅ MongoDB Connected");
 }
-connectDB();
 
 const verifyToken = async (req, res, next) => {
   console.log(req.user);
@@ -306,9 +306,6 @@ app.get("/citizen/stats", verifyToken, async (req, res) => {
 
   res.send({ total, pending, inProgress, resolved });
 });
-const profileCollection = client
-  .db("IssueHub")
-  .collection("User_And_Admin_And_Staff_fProfile");
 
 // ---------------------- Comment on Issue ----------------------
 app.post("/issues/:id/comment", verifyToken, async (req, res) => {
@@ -509,33 +506,87 @@ app.patch(
 );
 
 // Add Staff (Admin Only)
+// Add Staff (Admin Only)
 app.post("/admin/staff", verifyToken, verifyRole("admin"), async (req, res) => {
   try {
-    const { name, email, phone, password } = req.body;
+    const { name, email, password, phone } = req.body;
 
-    if (!email || !password)
-      return res.status(400).send({ message: "Email & Password required" });
+    if (!name || !email || !password) {
+      return res.status(400).send({ message: "All fields required" });
+    }
 
     const exists = await users.findOne({ email });
-    if (exists) return res.status(400).send({ message: "User already exists" });
+    if (exists) {
+      return res.status(400).send({ message: "Email already exists" });
+    }
 
     const newStaff = {
       name,
       email,
-      phone,
+      password, // ⚠️ পরে bcrypt করো
+      phone: phone || "",
       role: "staff",
-      password,
-      createdAt: new Date(),
       blocked: false,
+      createdAt: new Date(),
     };
 
-    const result = await users.insertOne(newStaff);
+    await users.insertOne(newStaff);
 
-    res.send({ success: true, staffId: result.insertedId });
+    res.send({ success: true, message: "Staff added successfully" });
   } catch (err) {
     res.status(500).send({ message: "Failed to add staff" });
   }
 });
+// Get All Staff
+app.get("/admin/staff", verifyToken, verifyRole("admin"), async (req, res) => {
+  const staff = await users
+    .find({ role: "staff" })
+    .project({ password: 0 }) // password hide
+    .toArray();
+
+  res.send({ success: true, staff });
+});
+app.patch(
+  "/admin/staff/:id/block",
+  verifyToken,
+  verifyRole("admin"),
+  async (req, res) => {
+    await users.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: { blocked: true } }
+    );
+
+    res.send({ success: true, message: "Staff blocked" });
+  }
+);
+app.patch(
+  "/admin/staff/:id/unblock",
+  verifyToken,
+  verifyRole("admin"),
+  async (req, res) => {
+    await users.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      { $set: { blocked: false } }
+    );
+
+    res.send({ success: true, message: "Staff unblocked" });
+  }
+);
+app.delete(
+  "/admin/staff/:id",
+  verifyToken,
+  verifyRole("admin"),
+  async (req, res) => {
+    const id = req.params.id;
+
+    if (id === req.user.uid) {
+      return res.status(400).send({ message: "Cannot delete own account" });
+    }
+
+    await users.deleteOne({ _id: new ObjectId(id) });
+    res.send({ success: true, message: "Staff deleted" });
+  }
+);
 
 // Update Staff
 app.put(
@@ -551,19 +602,7 @@ app.put(
     res.send({ success: true, message: "Staff updated" });
   }
 );
-// Delete Staff
-app.delete(
-  "/admin/staff/:id",
-  verifyToken,
-  verifyRole("admin"),
-  async (req, res) => {
-    const id = req.params.id;
 
-    await users.deleteOne({ _id: new ObjectId(id) });
-
-    res.send({ success: true, message: "Staff deleted" });
-  }
-);
 // Get All Staff (Admin Only)
 app.get(
   "/admin/staff/list",
@@ -574,6 +613,46 @@ app.get(
     res.send(staff);
   }
 );
+// Staff Change Password
+app.patch(
+  "/staff/change-password",
+  verifyToken,
+  verifyRole("staff"),
+  async (req, res) => {
+    try {
+      const { oldPassword, newPassword } = req.body;
+
+      if (!oldPassword || !newPassword) {
+        return res.status(400).send({ message: "Both passwords required" });
+      }
+
+      const staff = await users.findOne({
+        _id: new ObjectId(req.user.uid),
+        role: "staff",
+      });
+
+      if (!staff) {
+        return res.status(404).send({ message: "Staff not found" });
+      }
+
+      // ❗ এখন plain password ব্যবহার করছ (production এ bcrypt দরকার)
+      if (staff.password !== oldPassword) {
+        return res.status(400).send({ message: "Old password incorrect" });
+      }
+
+      await users.updateOne(
+        { _id: new ObjectId(req.user.uid) },
+        { $set: { password: newPassword } }
+      );
+
+      res.send({ success: true, message: "Password changed successfully" });
+    } catch (err) {
+      console.error(err);
+      res.status(500).send({ message: "Failed to change password" });
+    }
+  }
+);
+
 // Stff asigne for solve issue
 app.get(
   "/staff/issues/my-assigned",
@@ -962,40 +1041,6 @@ app.post("/payment/premium/verify", verifyToken, async (req, res) => {
   }
 });
 // #****************************************########################################
-// ---------------------- Get Current User Profile (Only Own) ----------------------
-// Update user profile (name + photo)
-
-app.put("/api/profile", verifyToken, async (req, res) => {
-  try {
-    const { name, photoUrl } = req.body;
-
-    const updateData = {};
-    if (name) updateData.name = name;
-    if (photoUrl) updateData.photo = photoUrl;
-
-    const result = await users.findOneAndUpdate(
-      { _id: new ObjectId(req.user.uid) },
-      { $set: updateData },
-      { returnDocument: "after" }
-    );
-
-    if (!result.value) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    res.json({
-      success: true,
-      user: {
-        ...result.value,
-        avatarUrl: result.value.photo || null,
-        _id: result.value._id.toString(),
-      },
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to update profile" });
-  }
-});
 
 const PDFDocument = require("pdfkit");
 
@@ -1090,6 +1135,123 @@ app.get("/payment/invoice/:paymentId", verifyToken, async (req, res) => {
   } catch (err) {
     console.error("Invoice generation error:", err);
     res.status(500).send({ message: "Failed to generate invoice" });
+  }
+});
+//###############################################
+// GET current user profile
+app.get("/api/profile", verifyToken, async (req, res) => {
+  console.log("GET /api/profile called");
+  console.log("User ID from token:", req.user.uid);
+
+  try {
+    const user = await users.findOne({ _id: new ObjectId(req.user.uid) });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.json({
+      _id: user._id.toString(),
+      name: user.name || "",
+      email: user.email,
+      phone: user.phone || "",
+      address: user.address || "",
+      age: user.age || "",
+      gender: user.gender || "",
+      profession: user.profession || "",
+      bio: user.bio || "",
+      interests: user.interests || [],
+      avatarUrl: user.photo || null,
+      nationality: user.nationality || "",
+      dob: user.dob || "",
+      maritalStatus: user.maritalStatus || "",
+      education: user.education || "",
+      languages: user.languages || [],
+      emergencyContactName: user.emergencyContactName || "",
+      emergencyContactPhone: user.emergencyContactPhone || "",
+      nidNumber: user.nidNumber || "",
+      passportNumber: user.passportNumber || "",
+      drivingLicenseNumber: user.drivingLicenseNumber || "",
+      role: user.role,
+      subscription: user.subscription || "free",
+    });
+  } catch (err) {
+    console.error("GET profile error:", err);
+    res.status(500).json({ message: "Failed to fetch profile" });
+  }
+});
+
+// শুধু এই অংশ রাখো — PUT রুট সহ সবকিছু একবারই
+
+app.put("/api/profile", verifyToken, async (req, res) => {
+  console.log("PUT /api/profile called");
+  console.log("User ID from token:", req.user.uid);
+  console.log("Received data:", req.body);
+
+  try {
+    // Clone body to avoid mutating original
+    const updates = { ...req.body };
+
+    // কখনো _id update হবে না
+    if (updates._id) delete updates._id;
+
+    // avatarUrl থাকলে photo field এ set করো
+    if (updates.avatarUrl) {
+      updates.photo = updates.avatarUrl;
+      delete updates.avatarUrl;
+    }
+
+    // Interests এবং languages নিশ্চিতভাবে array
+    if (!Array.isArray(updates.interests)) updates.interests = [];
+    if (!Array.isArray(updates.languages)) updates.languages = [];
+
+    const result = await users.updateOne(
+      { _id: new ObjectId(req.user.uid) },
+      { $set: updates }
+    );
+
+    console.log("MongoDB update result:", result);
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Updated user fetch
+    const updatedUser = await users.findOne({
+      _id: new ObjectId(req.user.uid),
+    });
+
+    res.json({
+      success: true,
+      user: {
+        _id: updatedUser._id.toString(),
+        name: updatedUser.name || "",
+        email: updatedUser.email,
+        phone: updatedUser.phone || "",
+        address: updatedUser.address || "",
+        age: updatedUser.age || "",
+        gender: updatedUser.gender || "",
+        profession: updatedUser.profession || "",
+        bio: updatedUser.bio || "",
+        interests: updatedUser.interests || [],
+        avatarUrl: updatedUser.photo || null,
+        nationality: updatedUser.nationality || "",
+        dob: updatedUser.dob || "",
+        maritalStatus: updatedUser.maritalStatus || "",
+        education: updatedUser.education || "",
+        languages: updatedUser.languages || [],
+        emergencyContactName: updatedUser.emergencyContactName || "",
+        emergencyContactPhone: updatedUser.emergencyContactPhone || "",
+        nidNumber: updatedUser.nidNumber || "",
+        passportNumber: updatedUser.passportNumber || "",
+        drivingLicenseNumber: updatedUser.drivingLicenseNumber || "",
+        role: updatedUser.role,
+        subscription: updatedUser.subscription || "free",
+      },
+    });
+  } catch (err) {
+    console.error("Update error:", err);
+    res.status(500).json({ message: "Failed to update profile" });
   }
 });
 
